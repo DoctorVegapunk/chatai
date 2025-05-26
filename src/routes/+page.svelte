@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import { db } from '../lib/firebase'; // Adjust path if necessary
-  import { collection, getDocs, query, orderBy, limit } from 'firebase/firestore';
+  import { collection, getDocs, query, orderBy, limit, doc, deleteDoc } from 'firebase/firestore';
 
   let scenarios = [];
   let recentChats = [];
@@ -37,6 +37,30 @@
   
   function startNewChat(scenarioId) {
     goto(`/chat/${scenarioId}`);
+  }
+
+  function handleEditScenario(scenarioId) {
+    goto(`/scenarios/${scenarioId}/edit`);
+  }
+
+  async function handleDeleteScenario(scenarioId, scenarioTitle) {
+    if (!window.confirm(`Are you sure you want to delete the scenario "${scenarioTitle}"? This action cannot be undone.`)) {
+      return;
+    }
+    try {
+      isLoadingScenarios = true; // Use existing loader or a specific one
+      const scenarioRef = doc(db, 'scenarios', scenarioId);
+      await deleteDoc(scenarioRef);
+      scenarios = scenarios.filter(s => s.id !== scenarioId);
+      // Optionally, add a success message state and display it
+      console.log(`Scenario "${scenarioTitle}" deleted successfully.`);
+    } catch (error) {
+      console.error("Error deleting scenario: ", error);
+      // Optionally, add an error message state and display it
+      alert(`Failed to delete scenario: ${error.message}`);
+    } finally {
+      isLoadingScenarios = false;
+    }
   }
 
   function getFirstNonPlayerAvatar(characters) {
@@ -94,11 +118,29 @@
                 {getFirstNonPlayerAvatar(scenario.characters)}
               {/if}
             </div>
-            <h3 class="text-xl font-semibold text-white truncate">{scenario.title || 'Untitled Scenario'}</h3>
+            <h3 class="text-xl font-semibold text-white truncate" title="{scenario.title || 'Untitled Scenario'}">{scenario.title || 'Untitled Scenario'}</h3>
           </div>
-          <p class="text-gray-300">{scenario.description}</p>
-          <div class="mt-4 text-sm text-${scenario.color}-400">
-            Start chatting →
+          <p class="text-gray-300 mb-4 min-h-[60px] overflow-hidden text-ellipsis">{scenario.description || 'No description available.'}</p>
+          <div class="mt-4 flex justify-between items-center">
+            <span class="text-sm text-${getCharacterColor(scenario)}-400">
+              Start chatting →
+            </span>
+            <div class="flex items-center space-x-2">
+              <button 
+                on:click|stopPropagation={() => handleEditScenario(scenario.id)} 
+                class="text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-gray-700 transition-colors"
+                aria-label={`Edit ${scenario.title || 'scenario'}`}
+              >
+                Edit
+              </button>
+              <button 
+                on:click|stopPropagation={() => handleDeleteScenario(scenario.id, scenario.title || 'Untitled Scenario')} 
+                class="text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-gray-700 transition-colors"
+                aria-label={`Delete ${scenario.title || 'scenario'}`}
+              >
+                Delete
+              </button>
+            </div>
           </div>
         </div>
         {/each}
