@@ -33,6 +33,10 @@
   let history = [];
   let historyIndex = -1;
 
+  // For AI Change Summary
+  let lastAiChange = { before: null, after: null };
+  let showChangeSummary = false;
+
   function deepCopy(obj) {
     return JSON.parse(JSON.stringify(obj));
   }
@@ -235,6 +239,7 @@
   }
 
   async function handleAIAssistance() {
+    const scenarioSnapshotBeforeAI = deepCopy(scenario);
     if (aiTaskMode === 'generate' && !plotIdea.trim()) {
       aiGenerationError = 'Please enter a plot idea to generate a new scenario (this will replace current content).';
       return;
@@ -302,7 +307,8 @@
         }));
       }
       successMessage = 'Scenario fields updated by AI! Review and save changes.';
-      console.log('[EDIT PAGE] AI Assistance success, about to save state.');
+      lastAiChange = { before: scenarioSnapshotBeforeAI, after: deepCopy(scenario) };
+      console.log('[EDIT PAGE] AI Assistance success, updated lastAiChange, about to save state.');
       saveState(); // Save the new state after AI assistance
     } catch (err) {
       console.error('[EDIT PAGE] AI Assistance Error in handleAIAssistance:', err);
@@ -438,8 +444,62 @@
           Redo
           <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline ml-1" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" /></svg>
         </button>
-        <span class="text-sm text-gray-400">({historyIndex >=0 ? historyIndex + 1 : 0} / {history.length} states)</span>
+        <span class="text-sm text-gray-400 mr-auto">({historyIndex >=0 ? historyIndex + 1 : 0} / {history.length} states)</span>
+        
+        <button
+          type="button"
+          on:click={() => showChangeSummary = !showChangeSummary}
+          disabled={!lastAiChange.after}
+          class="ml-4 px-3 py-1.5 text-xs bg-gray-700 hover:bg-gray-600 text-indigo-300 font-medium rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-opacity duration-150"
+        >
+          {showChangeSummary ? 'Hide' : 'Show'} Last AI Edit Summary
+        </button>
       </div>
+
+      {#if showChangeSummary && lastAiChange.before && lastAiChange.after}
+        <div class="change-summary bg-gray-800 p-4 rounded-lg mt-0 mb-6 border border-gray-700 text-sm">
+          <h4 class="font-semibold mb-3 text-md text-gray-200">Summary of Last AI Edit:</h4>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+            
+            <div>
+              <strong class="block text-gray-400 mb-0.5">Title:</strong>
+              <p class="text-xs text-red-400 line-through">{lastAiChange.before.title || 'N/A'}</p>
+              <p class="text-xs text-green-400">{lastAiChange.after.title || 'N/A'}</p>
+            </div>
+
+            <div>
+              <strong class="block text-gray-400 mb-0.5">Writing Style:</strong>
+              <p class="text-xs text-red-400 line-through">{lastAiChange.before.writingStyle || 'N/A'}</p>
+              <p class="text-xs text-green-400">{lastAiChange.after.writingStyle || 'N/A'}</p>
+            </div>
+
+            <div class="md:col-span-2">
+              <strong class="block text-gray-400 mb-0.5">Description:</strong>
+              <p class="text-xs text-red-400 line-through whitespace-pre-line">{lastAiChange.before.description || 'N/A'}</p>
+              <p class="text-xs text-green-400 whitespace-pre-line">{lastAiChange.after.description || 'N/A'}</p>
+            </div>
+            
+            <div class="md:col-span-2">
+              <strong class="block text-gray-400 mb-0.5">Story Outline:</strong>
+              <p class="text-xs text-red-400 line-through whitespace-pre-line">{lastAiChange.before.storyOutline || 'N/A'}</p>
+              <p class="text-xs text-green-400 whitespace-pre-line">{lastAiChange.after.storyOutline || 'N/A'}</p>
+            </div>
+
+            <div>
+              <strong class="block text-gray-400 mb-0.5">Characters ({lastAiChange.before.characters?.length || 0} &rarr; {lastAiChange.after.characters?.length || 0}):</strong>
+              <p class="text-xs text-red-400 line-through">{(lastAiChange.before.characters || []).map(c => c.name).join(', ') || 'N/A'}</p>
+              <p class="text-xs text-green-400">{(lastAiChange.after.characters || []).map(c => c.name).join(', ') || 'N/A'}</p>
+            </div>
+
+            <div>
+              <strong class="block text-gray-400 mb-0.5">Scenes ({lastAiChange.before.scenes?.length || 0} &rarr; {lastAiChange.after.scenes?.length || 0}):</strong>
+              <p class="text-xs text-red-400 line-through">{(lastAiChange.before.scenes || []).map(s => s.name).join(', ') || 'N/A'}</p>
+              <p class="text-xs text-green-400">{(lastAiChange.after.scenes || []).map(s => s.name).join(', ') || 'N/A'}</p>
+            </div>
+
+          </div>
+        </div>
+      {/if}
 
       <!-- AI Powered Scenario Assistance -->
       <div class="bg-gray-800 rounded-lg p-6 border border-gray-700 mb-8">
