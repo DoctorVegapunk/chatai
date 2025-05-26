@@ -2,13 +2,14 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { db } from '$lib/firebase';
-  import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+  import { collection, addDoc, serverTimestamp, getDocs } from 'firebase/firestore';
   
   // Character and scenario data
-  let scenario = {
+
+  // Define the initial state for a new scenario
+  const initialScenarioState = {
     title: '',
     description: '',
-    // writingStyle removed
     characters: [
       {
         name: 'Player',
@@ -19,7 +20,7 @@
         physicalAttributes: ['', '', ''],
         backstory: '',
         isPlayer: true,
-        gender: 'male' // Default gender for player
+        gender: 'male'
       },
       {
         name: 'AI Character',
@@ -30,7 +31,7 @@
         physicalAttributes: ['', '', ''],
         backstory: '',
         isPlayer: false,
-        gender: 'female' // Default gender for AI
+        gender: 'female'
       }
     ],
     scenes: [
@@ -39,17 +40,120 @@
         description: ''
       }
     ],
-    createdAt: null
+    createdAt: null // Will be set by serverTimestamp on save
   };
+
+  let scenario = JSON.parse(JSON.stringify(initialScenarioState)); // Initialize scenario with a deep copy
+
+  // History for Undo/Redo
+  let history = [];
+  let historyIndex = -1;
+
+  function deepCopy(obj) {
+    return JSON.parse(JSON.stringify(obj));
+  }
+
+  function saveState() {
+    // If we've undone, and then make a new change, clear the "future" history
+    if (historyIndex < history.length - 1) {
+      history = history.slice(0, historyIndex + 1);
+    }
+    history.push(deepCopy(scenario));
+    historyIndex = history.length - 1;
+    history = [...history]; 
+    console.log('[NEW PAGE] State saved. History length:', history.length, 'Index:', historyIndex, 'Current Scenario Title:', scenario.title);
+  }
+
+  function undo() {
+    if (historyIndex > 0) {
+      historyIndex--;
+      scenario = deepCopy(history[historyIndex]);
+      console.log('[NEW PAGE] Undo. History index:', historyIndex, 'Restored Scenario Title:', scenario.title);
+    }
+  }
+
+  function redo() {
+    if (historyIndex < history.length - 1) {
+      historyIndex++;
+      scenario = deepCopy(history[historyIndex]);
+      console.log('[NEW PAGE] Redo. History index:', historyIndex, 'Restored Scenario Title:', scenario.title);
+    }
+  }
+
+  let existingScenarios = [];
+  let selectedScenarioId = ''; // To bind with the select dropdown
   
   let isSubmitting = false;
   let errorMessage = '';
   let successMessage = '';
 
+  onMount(async () => {
+    saveState(); // Save the initial blank/default state of 'scenario'
+    try {
+      const scenariosCollection = collection(db, 'scenarios');
+      const querySnapshot = await getDocs(scenariosCollection);
+      existingScenarios = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      // Sort scenarios by title for easier selection
+      existingScenarios.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+      existingScenarios = [...existingScenarios]; // Trigger reactivity 
+    } catch (error) {
+      console.error("Error fetching existing scenarios:", error);
+      errorMessage = "Could not load existing scenarios. Please try refreshing the page.";
+    }
+  });
+
+  function handleScenarioSelection() {
+    if (!selectedScenarioId) {
+      scenario = deepCopy(initialScenarioState);
+      plotIdea = ''; 
+      aiTaskMode = 'generate'; 
+      improvementInstructions = '';
+    } else {
+      const selected = existingScenarios.find(s => s.id === selectedScenarioId);
+      if (selected) {
+        let tempScenario = deepCopy(selected);
+        delete tempScenario.id; 
+        delete tempScenario.createdAt; // Will be set on new save
+        tempScenario.updatedAt = null; // Clear updatedAt if it exists from template
+
+        tempScenario.characters = (tempScenario.characters || []).map(char => ({
+          ...initialScenarioState.characters[0], // Base structure from initial state
+          ...char,
+          avatarFile: null, 
+          avatarPreview: char.avatar || '', 
+        }));
+        
+        if (!tempScenario.scenes || tempScenario.scenes.length === 0) {
+          tempScenario.scenes = [{ name: '', description: '' }];
+        } else {
+          tempScenario.scenes = tempScenario.scenes.map(scene => ({
+              name: scene.name || '',
+              description: scene.description || ''
+          }));
+        }
+        scenario = tempScenario;
+        plotIdea = ''; 
+        aiTaskMode = 'generate'; 
+        improvementInstructions = ''; 
+      } else {
+        // Fallback if selectedId is somehow invalid, reset to initial
+        scenario = deepCopy(initialScenarioState);
+        plotIdea = '';
+        aiTaskMode = 'generate';
+        improvementInstructions = ''; // Clear instructions
+        console.log('[NEW PAGE] AI Assistance success, about to save state.');
+        saveState(); // Save the new state after AI assistance scenario has been updated by selection or reset
+      }
+    }
+    saveState(); // Save state after scenario has been updated by selection or reset
+  }
+
   // AI Scenario Generation State
   let plotIdea = '';
   let isGeneratingAIScenario = false;
   let aiGenerationError = '';
+  let aiTaskMode = 'generate'; // 'generate' or 'improve'
+  let improvementInstructions = '';
   
   // Avatar options (defaultAvatars array removed)
   
@@ -155,9 +259,13 @@
     }
   }
   
-  async function handleAIGenerateScenario() {
-    if (!plotIdea.trim()) {
-      aiGenerationError = 'Please enter a plot idea.';
+  async function handleAIAssistance() {
+    if (aiTaskMode === 'generate' && !plotIdea.trim()) {
+      aiGenerationError = 'Please enter a plot idea to generate a new scenario.';
+      return;
+    }
+    if (aiTaskMode === 'improve' && !scenario.title.trim() && !scenario.description.trim()) {
+      aiGenerationError = 'Please fill in some scenario details (like title or description) or load an existing one to use the AI improvement feature.';
       return;
     }
     isGeneratingAIScenario = true;
@@ -166,12 +274,31 @@
     errorMessage = '';
 
     try {
+      let requestBody = {};
+      if (aiTaskMode === 'generate') {
+        requestBody = { plotIdea, taskType: 'generate' };
+      } else { // improve
+        // Create a clean version of the scenario, removing client-side only properties
+        const scenarioToImprove = JSON.parse(JSON.stringify(scenario));
+        scenarioToImprove.characters = scenarioToImprove.characters.map(char => {
+          const { avatarFile, avatarPreview, ...rest } = char;
+          return rest; // Keep avatar URL if present, but not file/preview
+        });
+        delete scenarioToImprove.id; // Ensure no ID is sent if it's a template
+        
+        requestBody = { 
+          existingScenario: scenarioToImprove, 
+          taskType: 'improve', 
+          improvementInstructions: improvementInstructions.trim() 
+        };
+      }
+
       const response = await fetch('/api/groqScenarioGenerator', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ plotIdea }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -226,10 +353,11 @@
       }
       
       successMessage = 'Scenario generated by AI! Review and make any adjustments.';
-
+      console.log('[NEW PAGE] AI Assistance success, about to save state.');
+      saveState(); // Save state after successful AI operation
     } catch (error) {
-      console.error('AI Generation Error:', error);
-      aiGenerationError = error.message || 'An unknown error occurred during AI generation.';
+      console.error('[NEW PAGE] AI Scenario Generation Error in handleAIAssistance:', error);
+      aiGenerationError = error.message || 'Failed to generate scenario.';
     } finally {
       isGeneratingAIScenario = false;
     }
@@ -322,47 +450,121 @@
     </div>
     
     <!-- Form -->
-    <!-- AI Scenario Generation -->
+    <!-- AI Powered Scenario Assistance -->
     <div class="bg-gray-800 rounded-lg p-6 border border-gray-700 mb-8">
-      <h2 class="text-xl font-semibold mb-4 text-white">✨ Generate Scenario with AI ✨</h2>
-      <p class="text-gray-400 mb-4">Describe your plot idea below, and let AI help you draft the scenario details. You can then edit the generated content.</p>
-      
+      <h2 class="text-xl font-semibold mb-4">AI Powered Scenario Assistance</h2>
+
       <div class="mb-4">
-        <label for="plotIdea" class="block text-sm font-medium text-gray-300 mb-2">Your Plot Idea:</label>
-        <textarea 
-          id="plotIdea" 
-          bind:value={plotIdea} 
-          rows="4"
-          class="w-full bg-gray-700 border border-gray-600 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm text-white"
-          placeholder="e.g., A detective in a cyberpunk city investigates a series of strange disappearances linked to a new virtual reality game..."
-        ></textarea>
+        <span class="block text-sm font-medium text-gray-300 mb-2">AI Task:</span>
+        <div class="flex items-center space-x-4">
+          <label class="flex items-center space-x-2 cursor-pointer">
+            <input type="radio" bind:group={aiTaskMode} name="aiTaskMode" value="generate" class="form-radio text-indigo-600 bg-gray-700 border-gray-600 focus:ring-indigo-500">
+            <span class="text-gray-300">Generate New Scenario</span>
+          </label>
+          <label class="flex items-center space-x-2 cursor-pointer">
+            <input type="radio" bind:group={aiTaskMode} name="aiTaskMode" value="improve" class="form-radio text-indigo-600 bg-gray-700 border-gray-600 focus:ring-indigo-500">
+            <span class="text-gray-300">Improve Current Scenario</span>
+          </label>
+        </div>
       </div>
 
-      {#if aiGenerationError}
-        <div class="bg-red-900 text-white p-3 rounded-md mb-4">
-          <p><strong>Error:</strong> {aiGenerationError}</p>
+      {#if aiTaskMode === 'generate'}
+        <p class="text-gray-400 mb-4">
+          Need inspiration? Enter a plot idea below and let AI help you draft a new scenario from scratch.
+        </p>
+        <div class="mb-4">
+          <label for="plot-idea" class="block text-sm font-medium text-gray-300 mb-2">Your Plot Idea</label>
+          <textarea 
+            id="plot-idea" 
+            bind:value={plotIdea} 
+            rows="3"
+            class="w-full bg-gray-700 border border-gray-600 text-white rounded-md shadow-sm p-2 focus:ring-indigo-500 focus:border-indigo-500"
+            placeholder="e.g., A detective investigating a mysterious disappearance in a futuristic city."
+          ></textarea>
+        </div>
+      {/if}
+
+      {#if aiTaskMode === 'improve'}
+        <p class="text-gray-400 mb-4">
+          Want to enhance the current scenario? Provide specific instructions or let the AI generally improve it.
+        </p>
+        <div class="mb-4">
+          <label for="improvement-instructions" class="block text-sm font-medium text-gray-300 mb-2">Improvement Instructions (Optional)</label>
+          <textarea 
+            id="improvement-instructions" 
+            bind:value={improvementInstructions} 
+            rows="3"
+            class="w-full bg-gray-700 border border-gray-600 text-white rounded-md shadow-sm p-2 focus:ring-indigo-500 focus:border-indigo-500"
+            placeholder="e.g., Make the characters more conflicted, add a surprising twist to the plot, expand the description of the main scene..."
+          ></textarea>
         </div>
       {/if}
 
       <button 
         type="button" 
-        on:click={handleAIGenerateScenario} 
-        disabled={isGeneratingAIScenario}
-        class="w-full flex justify-center items-center px-6 py-3 border border-transparent rounded-md shadow-sm text-base font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:bg-gray-500 disabled:cursor-not-allowed"
+        on:click={handleAIAssistance} 
+        disabled={isGeneratingAIScenario || (aiTaskMode === 'improve' && !scenario.title && !scenario.description && !selectedScenarioId)}
+        class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-md disabled:opacity-50 transition duration-150 ease-in-out"
       >
         {#if isGeneratingAIScenario}
-          <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-          </svg>
-          Generating Scenario...
-        {:else}
+          Processing...
+        {:else if aiTaskMode === 'generate'}
           Generate with AI
+        {:else} <!-- aiTaskMode === 'improve' -->
+          Improve with AI
         {/if}
       </button>
     </div>
 
+    <!-- Undo/Redo Buttons -->
+    <div class="my-6 flex items-center justify-start space-x-3 p-4 bg-gray-800 rounded-lg border border-gray-700">
+      <h3 class="text-lg font-medium text-gray-200 mr-4">AI Edit History:</h3>
+      <button 
+        type="button" 
+        on:click={undo} 
+        disabled={historyIndex <= 0}
+        class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-opacity duration-150"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline mr-1" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" /></svg>
+        Undo
+      </button>
+      <button 
+        type="button" 
+        on:click={redo} 
+        disabled={historyIndex >= history.length - 1 || history.length === 0}
+        class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-opacity duration-150"
+      >
+        Redo
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline ml-1" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" /></svg>
+      </button>
+      <span class="text-sm text-gray-400">({historyIndex >=0 ? historyIndex + 1 : 0} / {history.length} states)</span>
+    </div>
+
     <form on:submit|preventDefault={handleSubmit} class="space-y-8">
+      <!-- Select Existing Scenario -->
+      <div class="bg-gray-800 rounded-lg p-6 border border-gray-700 mb-8">
+        <h2 class="text-xl font-semibold mb-4">Start from Existing Scenario (Optional)</h2>
+        <label for="existing-scenario-select" class="block text-sm font-medium text-gray-300 mb-2">
+          Select a scenario to use as a template:
+        </label>
+        {#if existingScenarios.length > 0}
+          <select
+            id="existing-scenario-select"
+            bind:value={selectedScenarioId}
+            on:change={handleScenarioSelection}
+            class="w-full bg-gray-700 border border-gray-600 text-white rounded-md shadow-sm p-2 focus:ring-indigo-500 focus:border-indigo-500"
+          >
+            <option value="">-- Create New From Scratch --</option>
+            {#each existingScenarios as existing}
+              <option value={existing.id}>{existing.title || 'Untitled Scenario'}</option>
+            {/each}
+          </select>
+        {:else if errorMessage && errorMessage.includes("Could not load existing scenarios")}
+          <p class="text-red-400">{errorMessage}</p>
+        {:else}
+          <p class="text-gray-400">Loading existing scenarios or none found...</p>
+        {/if}
+      </div>
       <!-- Basic Scenario Information -->
       <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
         <h2 class="text-xl font-semibold mb-4">Scenario Details</h2>

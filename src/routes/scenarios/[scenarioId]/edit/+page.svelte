@@ -22,10 +22,51 @@
   let errorMessage = '';
   let successMessage = '';
 
-  // AI Scenario Generation State (can be kept for editing assistance)
-  let plotIdea = ''; // Could be pre-filled with scenario.description or kept separate
+  // AI Scenario Generation State
+  let plotIdea = ''; 
   let isGeneratingAIScenario = false;
   let aiGenerationError = '';
+  let aiTaskMode = 'improve'; // 'generate' or 'improve', default to 'improve' for edit page
+  let improvementInstructions = '';
+
+  // History for Undo/Redo
+  let history = [];
+  let historyIndex = -1;
+
+  function deepCopy(obj) {
+    return JSON.parse(JSON.stringify(obj));
+  }
+
+  function saveState() {
+    if (isLoading) return; // Don't save during initial load or if load failed
+    // If we've undone, and then make a new change, clear the "future" history
+    if (historyIndex < history.length - 1) {
+      history = history.slice(0, historyIndex + 1);
+    }
+    history.push(deepCopy(scenario));
+    historyIndex = history.length - 1;
+    history = [...history]; // Trigger reactivity
+    console.log('[EDIT PAGE] State saved. History length:', history.length, 'Index:', historyIndex, 'Current Scenario Title:', scenario.title);
+    console.log('[EDIT PAGE] Saved state:', JSON.parse(JSON.stringify(history[historyIndex])));
+  }
+
+  function undo() {
+    if (historyIndex > 0) {
+      historyIndex--;
+      scenario = deepCopy(history[historyIndex]);
+      console.log('[EDIT PAGE] Undo. History index:', historyIndex, 'Restored Scenario Title:', scenario.title);
+      console.log('[EDIT PAGE] Restored state:', JSON.parse(JSON.stringify(scenario)));
+    }
+  }
+
+  function redo() {
+    if (historyIndex < history.length - 1) {
+      historyIndex++;
+      scenario = deepCopy(history[historyIndex]);
+      console.log('[EDIT PAGE] Redo. History index:', historyIndex, 'Restored Scenario Title:', scenario.title);
+      console.log('[EDIT PAGE] Restored state:', JSON.parse(JSON.stringify(scenario)));
+    }
+  }
 
   onMount(async () => {
     console.log('Edit page onMount, $page.params:', $page.params);
@@ -72,6 +113,10 @@
         scenario.characters.forEach((char, index) => {
           originalCharacterAvatars[index] = char.avatar;
         });
+        // Successfully loaded, now save initial state for undo/redo
+        // Ensure isLoading is false before saving to avoid premature saveState calls if loadScenarioData is complex
+        // The 'finally' block sets isLoading = false, so we defer saveState until after that, or check isLoading here.
+        // For simplicity, we'll ensure saveState is called after isLoading is confirmed false.
       } else {
         console.log('Scenario snapshot does NOT exist for ID:', id);
         errorMessage = 'Scenario not found.';
@@ -83,6 +128,9 @@
     } finally {
       console.log('loadScenarioData finally block. Setting isLoading to false.');
       isLoading = false;
+      if (!errorMessage && scenario.title) { // Only save initial state if loading was successful
+        saveState();
+      }
     }
   }
   
@@ -186,21 +234,42 @@
     }
   }
 
-  async function handleAIGenerateScenario() {
-    if (!plotIdea.trim()) {
-      aiGenerationError = 'Please enter a plot idea.';
+  async function handleAIAssistance() {
+    if (aiTaskMode === 'generate' && !plotIdea.trim()) {
+      aiGenerationError = 'Please enter a plot idea to generate a new scenario (this will replace current content).';
       return;
     }
+    // For 'improve' mode, the scenario itself is the basis, instructions are optional.
     isGeneratingAIScenario = true;
     aiGenerationError = '';
     successMessage = '';
     errorMessage = '';
 
     try {
+      let requestBody = {};
+      if (aiTaskMode === 'generate') {
+        requestBody = { plotIdea, taskType: 'generate' };
+      } else { // improve
+        const scenarioToImprove = JSON.parse(JSON.stringify(scenario));
+        scenarioToImprove.characters = scenarioToImprove.characters.map(char => {
+          const { avatarFile, avatarPreview, ...rest } = char;
+          return rest; 
+        });
+        delete scenarioToImprove.id; // API doesn't need existing ID for improvement logic
+        
+        requestBody = { 
+          existingScenario: scenarioToImprove, 
+          taskType: 'improve', 
+          improvementInstructions: improvementInstructions.trim() 
+        };
+      }
+
       const response = await fetch('/api/groqScenarioGenerator', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plotIdea }),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -233,9 +302,11 @@
         }));
       }
       successMessage = 'Scenario fields updated by AI! Review and save changes.';
-    } catch (error) {
-      console.error('AI Generation Error:', error);
-      aiGenerationError = error.message || 'An unknown error occurred during AI generation.';
+      console.log('[EDIT PAGE] AI Assistance success, about to save state.');
+      saveState(); // Save the new state after AI assistance
+    } catch (err) {
+      console.error('[EDIT PAGE] AI Assistance Error in handleAIAssistance:', err);
+      aiGenerationError = err.message || 'Failed to get AI assistance.';
     } finally {
       isGeneratingAIScenario = false;
     }
@@ -346,44 +417,98 @@
         <a href="/" class="text-indigo-300 hover:text-indigo-200 mt-2 inline-block">Go to Homepage</a>
       </div>
     {:else}
-      <!-- AI Scenario Generation -->
+      <!-- Undo/Redo Buttons -->
+      <div class="my-6 flex items-center justify-start space-x-3 p-4 bg-gray-800 rounded-lg border border-gray-700">
+        <h3 class="text-lg font-medium text-gray-200 mr-4">AI Edit History:</h3>
+        <button 
+          type="button" 
+          on:click={undo} 
+          disabled={historyIndex <= 0}
+          class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-opacity duration-150"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline mr-1" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" /></svg>
+          Undo
+        </button>
+        <button 
+          type="button" 
+          on:click={redo} 
+          disabled={historyIndex >= history.length - 1 || history.length === 0}
+          class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-opacity duration-150"
+        >
+          Redo
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline ml-1" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" /></svg>
+        </button>
+        <span class="text-sm text-gray-400">({historyIndex >=0 ? historyIndex + 1 : 0} / {history.length} states)</span>
+      </div>
+
+      <!-- AI Powered Scenario Assistance -->
       <div class="bg-gray-800 rounded-lg p-6 border border-gray-700 mb-8">
-        <h2 class="text-xl font-semibold mb-4 text-white">✨ AI Assistance ✨</h2>
-        <p class="text-gray-400 mb-4">Need help refining your scenario? Describe what you want to change or add, and let AI assist you. This will update the fields below.</p>
-        
+        <h2 class="text-xl font-semibold mb-4">AI Powered Scenario Assistance</h2>
+
         <div class="mb-4">
-          <label for="plotIdea" class="block text-sm font-medium text-gray-300 mb-2">Your Idea/Prompt for AI:</label>
-          <textarea 
-            id="plotIdea" 
-            bind:value={plotIdea} 
-            rows="3"
-            class="w-full bg-gray-700 border border-gray-600 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm text-white"
-            placeholder="e.g., Make the first character a mysterious sorcerer instead... or Add a haunted forest scene..."
-          ></textarea>
+          <span class="block text-sm font-medium text-gray-300 mb-2">AI Task:</span>
+          <div class="flex items-center space-x-4">
+            <label class="flex items-center space-x-2 cursor-pointer">
+              <input type="radio" bind:group={aiTaskMode} name="aiTaskModeEdit" value="improve" class="form-radio text-indigo-600 bg-gray-700 border-gray-600 focus:ring-indigo-500">
+              <span class="text-gray-300">Improve Current Scenario</span>
+            </label>
+            <label class="flex items-center space-x-2 cursor-pointer">
+              <input type="radio" bind:group={aiTaskMode} name="aiTaskModeEdit" value="generate" class="form-radio text-indigo-600 bg-gray-700 border-gray-600 focus:ring-indigo-500">
+              <span class="text-gray-300">Generate New (Replaces Current)</span>
+            </label>
+          </div>
         </div>
 
-        {#if aiGenerationError}
-          <div class="bg-red-900 text-white p-3 rounded-md mb-4">
-            <p><strong>AI Error:</strong> {aiGenerationError}</p>
+        {#if aiTaskMode === 'generate'}
+          <p class="text-gray-400 mb-4">
+            Enter a plot idea to generate a completely new scenario. <strong>Warning: This will replace all current scenario content.</strong>
+          </p>
+          <div class="mb-4">
+            <label for="plot-idea-edit" class="block text-sm font-medium text-gray-300 mb-2">Your Plot Idea</label>
+            <textarea 
+              id="plot-idea-edit" 
+              bind:value={plotIdea} 
+              rows="3"
+              class="w-full bg-gray-700 border border-gray-600 text-white rounded-md shadow-sm p-2 focus:ring-indigo-500 focus:border-indigo-500"
+              placeholder="e.g., A fantasy quest to find a lost artifact."
+            ></textarea>
+          </div>
+        {/if}
+
+        {#if aiTaskMode === 'improve'}
+          <p class="text-gray-400 mb-4">
+            Provide specific instructions to enhance the current scenario, or let the AI generally improve it.
+          </p>
+          <div class="mb-4">
+            <label for="improvement-instructions-edit" class="block text-sm font-medium text-gray-300 mb-2">Improvement Instructions (Optional)</label>
+            <textarea 
+              id="improvement-instructions-edit" 
+              bind:value={improvementInstructions} 
+              rows="3"
+              class="w-full bg-gray-700 border border-gray-600 text-white rounded-md shadow-sm p-2 focus:ring-indigo-500 focus:border-indigo-500"
+              placeholder="e.g., Make the villain more compelling, add a plot twist to the first scene..."
+            ></textarea>
           </div>
         {/if}
 
         <button 
           type="button" 
-          on:click={handleAIGenerateScenario} 
+          on:click={handleAIAssistance} 
           disabled={isGeneratingAIScenario}
-          class="w-full flex justify-center items-center px-6 py-3 border border-transparent rounded-md shadow-sm text-base font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:bg-gray-500 disabled:cursor-not-allowed"
+          class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-md disabled:opacity-50 transition duration-150 ease-in-out"
         >
           {#if isGeneratingAIScenario}
-            <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            Updating with AI...
+            Processing...
+          {:else if aiTaskMode === 'generate'}
+            Generate with AI (Replace Current)
           {:else}
-            Get AI Suggestions
+            Improve with AI
           {/if}
         </button>
+
+        {#if aiGenerationError}
+          <p class="text-red-400 mt-4">{aiGenerationError}</p>
+        {/if}
       </div>
 
       <form on:submit|preventDefault={handleSubmit} class="space-y-8">
