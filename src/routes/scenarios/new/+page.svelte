@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import { enhance } from '$app/forms'; // Added for server actions
   import { goto } from '$app/navigation';
   import { db } from '$lib/firebase';
   import { collection, addDoc, serverTimestamp, getDocs } from 'firebase/firestore';
@@ -90,6 +91,8 @@
   let isSubmitting = false;
   let errorMessage = '';
   let successMessage = '';
+  export let form; // Added to receive data from server action (e.g., errors)
+  let jsonScenarioData = ''; // Will hold the stringified scenario data for the form
 
   onMount(async () => {
     saveState(); // Save the initial blank/default state of 'scenario'
@@ -250,16 +253,19 @@
         method: 'POST',
         body: formData
       });
-      
+
       if (!response.ok) {
-        throw new Error('Upload failed');
+        const errorBody = await response.text();
+        console.error('UploadThing request failed:', response.status, errorBody);
+        throw new Error(`UploadThing request failed: ${response.status} ${errorBody}`);
       }
       
       const data = await response.json();
       return data[0].url; // UploadThing returns an array of uploaded files
     } catch (error) {
-      console.error('Upload error:', error);
-      throw new Error('Failed to upload image');
+      console.error('Failed to upload file to UploadThing:', error.message);
+      // Re-throw the error so prepareAndSubmit can catch it and display a message
+      throw error;
     }
   }
   
@@ -369,7 +375,10 @@
     }
   }
 
-  async function handleSubmit() {
+  // This function is now primarily for client-side prep before the server action is called.
+  // It will be triggered by a button click, not the form's on:submit directly.
+  async function prepareAndSubmit() {
+    console.log('[DEBUG] prepareAndSubmit called');
     // Validate form
     if (!scenario.title.trim()) {
       errorMessage = 'Please enter a scenario title';
@@ -394,7 +403,8 @@
     }
     
     try {
-      isSubmitting = true;
+      // isSubmitting = true; // Managed by use:enhance
+      console.log('[DEBUG] Top of try block in prepareAndSubmit. Current scenario title:', scenario.title);
       errorMessage = '';
       
       // Process avatars: upload files if necessary
@@ -402,13 +412,16 @@
         const character = scenario.characters[i];
         
         if (character.avatarFile) {
+          console.log(`[DEBUG] Character ${i} (${character.name}) has avatarFile. Attempting upload.`);
           // If it's a file upload, upload to UploadThing
           character.avatar = await uploadToUploadThing(character.avatarFile);
           character.avatarFile = null;
+          console.log(`[DEBUG] Avatar uploaded for character ${i}. New URL: ${character.avatar}`);
           character.avatarPreview = '';
         }
       }
       
+      console.log('[DEBUG] Finished avatar processing loop.');
       // Prepare data for Firestore
       const scenarioData = {
         title: scenario.title,
@@ -430,20 +443,22 @@
       };
       
       // Save to Firestore
-      const docRef = await addDoc(collection(db, 'scenarios'), scenarioData);
-      
-      successMessage = 'Scenario created successfully!';
-      
-      // Redirect after a brief delay
-      setTimeout(() => {
-        goto('/scenarios/' + docRef.id);
-      }, 2000);
-      
+      // Data is prepared, now stringify it for the hidden form field.
+      // The actual submission to Firestore and Zilliz, and the redirect, are handled by the server action.
+      console.log('[DEBUG] scenarioData object before stringify:', JSON.parse(JSON.stringify(scenarioData))); // Deep copy for logging
+      jsonScenarioData = JSON.stringify(scenarioData);
+      console.log('[DEBUG] jsonScenarioData is NOW:', jsonScenarioData ? jsonScenarioData.substring(0, 200) + '...' : 'EMPTY');
+      console.log('Scenario data prepared for server submission:', jsonScenarioData);
+      // The form will now submit with this data.
+      // Success messages/redirects are handled by the server action's response and SvelteKit's enhance.
+      // If we reach here without returning, it means client-side prep was successful.
+      // `isSubmitting` will be managed by the `enhance` callback.
+      // No explicit `goto` or `successMessage` setting here for server success.
     } catch (error) {
       console.error('Error creating scenario:', error);
       errorMessage = 'Error creating scenario: ' + error.message;
     } finally {
-      isSubmitting = false;
+      // isSubmitting is now managed by use:enhance
     }
   }
 </script>
@@ -599,7 +614,27 @@
       </div>
     {/if}
 
-    <form on:submit|preventDefault={handleSubmit} class="space-y-8">
+    <!--
+      The form now uses method="POST" (default for actions) and use:enhance.
+      The handleSubmit logic is now in `prepareAndSubmit` which is called by the button's on:click.
+      The `enhance` function will manage the actual submission lifecycle.
+    -->
+    <form method="POST" use:enhance={() => {
+      return async ({ update }) => {
+        await update(); // This is crucial for SvelteKit to update form state, etc.
+        // `form` prop will be updated by SvelteKit with the action's result.
+        // Server-side errors will be in form?.error.
+        // Successful redirects are handled automatically.
+        if (form?.error && typeof form.error === 'string') {
+            errorMessage = form.error; // Display server error
+        } else if (form?.error && typeof form.error === 'object' && form.error.error) {
+            errorMessage = form.error.error; // If server returns { error: 'message' }
+        }
+        // Clear client-side success message if form submission had an error, or rely on redirect for success.
+        if (form?.error) successMessage = ''; 
+      };
+    }} class="space-y-8">
+      <input type="hidden" name="scenarioDataJson" bind:value={jsonScenarioData} />
       <!-- Select Existing Scenario -->
       <div class="bg-gray-800 rounded-lg p-6 border border-gray-700 mb-8">
         <h2 class="text-xl font-semibold mb-4">Start from Existing Scenario (Optional)</h2>
@@ -922,15 +957,16 @@
       </div>
       
       <!-- Error/Success messages -->
-      {#if errorMessage}
+      {#if errorMessage} <!-- Handles client-side and server-side errors via `form` prop -->
         <div class="bg-red-900 text-white p-4 rounded-md">
-          {errorMessage}
+          <p class="font-semibold">Error:</p>
+          <p>{typeof errorMessage === 'object' ? JSON.stringify(errorMessage) : errorMessage}</p>
         </div>
       {/if}
-      
-      {#if successMessage}
-        <div class="bg-green-900 text-white p-4 rounded-md">
-          {successMessage}
+      {#if successMessage && !form?.error} <!-- Only show client-side success if no server error -->
+        <div class="bg-green-700 text-white p-4 rounded-md">
+          <p class="font-semibold">Success:</p>
+          <p>{successMessage}</p>
         </div>
       {/if}
       
@@ -945,6 +981,15 @@
         <button
           type="submit"
           disabled={isSubmitting}
+          on:click={async (event) => {
+            console.log('[DEBUG] Create Scenario button CLICKED!');
+            errorMessage = ''; // Clear previous client-side errors
+            await prepareAndSubmit(); // Prepare data, sets jsonScenarioData or errorMessage
+            if (errorMessage) { // If client-side prep failed
+              event.preventDefault(); // Stop the form submission
+            }
+            // If no errorMessage, click proceeds, form submits, enhance handles it.
+          }}
           class="px-6 py-3 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
         >
           {#if isSubmitting}

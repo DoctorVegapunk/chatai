@@ -19,6 +19,7 @@
 	"dependencies": {
 		"@tailwindcss/vite": "^4.1.7",
 		"@uploadthing/svelte": "^7.3.1",
+		"@zilliz/milvus2-sdk-node": "^2.5.9",
 		"firebase": "^11.8.1",
 		"groq-sdk": "^0.22.0",
 		"tailwindcss": "^4.1.7",

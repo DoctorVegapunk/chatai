@@ -44,20 +44,30 @@
   }
 
   async function handleDeleteScenario(scenarioId, scenarioTitle) {
-    if (!window.confirm(`Are you sure you want to delete the scenario "${scenarioTitle}"? This action cannot be undone.`)) {
+    if (!window.confirm(`Are you sure you want to delete the scenario "${scenarioTitle}"? This action will delete all associated messages and cannot be undone.`)) {
       return;
     }
+    
+    isLoadingScenarios = true; // Indicate loading state
+
     try {
-      isLoadingScenarios = true; // Use existing loader or a specific one
-      const scenarioRef = doc(db, 'scenarios', scenarioId);
-      await deleteDoc(scenarioRef);
-      scenarios = scenarios.filter(s => s.id !== scenarioId);
-      // Optionally, add a success message state and display it
-      console.log(`Scenario "${scenarioTitle}" deleted successfully.`);
+      const response = await fetch(`/api/scenarios/${scenarioId}`, {
+        method: 'DELETE',
+      });
+
+      const result = await response.json();
+
+      if (response.ok) {
+        console.log(`Scenario "${scenarioTitle}" (ID: ${scenarioId}) deleted successfully:`, result.message);
+        scenarios = scenarios.filter(s => s.id !== scenarioId);
+        alert(result.message || `Scenario "${scenarioTitle}" deleted successfully.`);
+      } else {
+        console.error(`Failed to delete scenario "${scenarioTitle}" (ID: ${scenarioId}):`, result.error || response.statusText);
+        alert(`Failed to delete scenario: ${result.error || 'Unknown server error'}`);
+      }
     } catch (error) {
-      console.error("Error deleting scenario: ", error);
-      // Optionally, add an error message state and display it
-      alert(`Failed to delete scenario: ${error.message}`);
+      console.error("Error calling delete API for scenario: ", error);
+      alert(`An error occurred while trying to delete the scenario: ${error.message}`);
     } finally {
       isLoadingScenarios = false;
     }
