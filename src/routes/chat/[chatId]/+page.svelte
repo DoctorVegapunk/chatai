@@ -42,19 +42,80 @@
 
   let formElement;
 
+
   function formatMessageText(text) {
     if (!text) return '';
-    return text
+    
+    // Log original text for debugging
+    console.log('Original text:', text);
+    
+    let formatted = text
+      // Handle (*action*) patterns - convert to italic and remove parentheses
       .replace(/\(\*([^*]+)\*\)/g, '<em class="text-gray-300 italic">$1</em>')
-      .replace(/\("([^"]+)"\)/g, '$1')
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      // Handle ("dialogue") patterns - remove parentheses and quotes, keep plain text
+      .replace(/\(\s*"([^"]+)"\s*\)/g, '$1')
+      // Handle **bold** patterns (but not when they're malformed)
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      // Clean up any remaining malformed patterns like ("text"*) or (*"text")
+      .replace(/\(\s*"([^"]*)"[^)]*\)/g, '$1')
+      .replace(/\(\s*\*?"([^"]*)"[^)]*\)/g, '$1')
+      // Handle any remaining simple (text) patterns - convert to italic
+      .replace(/\(\s*([^)]+)\s*\)/g, '<em class="text-gray-300 italic">$1</em>')
+      // Clean up any stray asterisks or quotes that might be left
+      .replace(/\*+(?![^<]*>)/g, '')
+      .replace(/"+(?![^<]*>)/g, '"')
+      // Clean up multiple spaces
+      .replace(/\s+/g, ' ')
+      .trim();
+    
+    // Log formatted text for debugging
+    console.log('Formatted text:', formatted);
+    
+    return formatted;
   }
 
-  // Lookup by name or id
-  function getCharacterById(characterId, characterName) {
+  // Counter to alternate between AI characters
+  let aiCharacterIndex = 0;
+
+  // Enhanced character lookup function
+  function getCharacterById(characterId, characterName, messageIndex = null) {
     if (!scenarioData?.characters) return null;
+    
     const chars = scenarioData.characters.map(c => ({ id: c.id || c.name, ...c }));
-    return chars.find(c => c.id === characterId || c.name === characterName) || null;
+    
+    // First try to find by exact ID match
+    let character = chars.find(c => c.id === characterId);
+    
+    // If not found, try by name
+    if (!character && characterName) {
+      character = chars.find(c => c.name === characterName);
+    }
+    
+    // If still not found and characterName is "AI", alternate between AI characters
+    if (!character && characterName === "AI" && aiCharacters.length > 0) {
+      if (messageIndex !== null) {
+        // Count how many AI messages we've seen so far to determine character
+        const aiMessagesBefore = messages.slice(0, messageIndex).filter(m => m.sender === 'bot' && m.characterName === 'AI').length;
+        const charIndex = aiMessagesBefore % aiCharacters.length;
+        character = aiCharacters[charIndex];
+      } else {
+        // Fallback to cycling through characters
+        character = aiCharacters[aiCharacterIndex % aiCharacters.length];
+        aiCharacterIndex++;
+      }
+    }
+    
+    return character || null;
+  }
+
+  // Function to determine which character should respond (for AI messages)
+  function getResponseCharacter(characterName, characterId) {
+    // If we have a specific character, use it
+    const foundChar = getCharacterById(characterId, characterName);
+    if (foundChar) return foundChar;
+    
+    // If characterName is "AI" or generic, cycle through AI characters
+    return aiCharacters[aiCharacterIndex % aiCharacters.length] || null;
   }
 
   function handleSubmitResult({ result }) {
@@ -62,6 +123,24 @@
     if (result?.type === 'success') {
       const data = result.data;
       if (data.success && Array.isArray(data.replies)) {
+        // Log all character responses to console
+        console.log('=== AI CHARACTER RESPONSES ===');
+        console.log(`Received ${data.replies.length} character response(s):`);
+        
+        data.replies.forEach((reply, index) => {
+          console.log(`\n--- Character ${index + 1} ---`);
+          console.log(`Character Name: ${reply.characterName}`);
+          console.log(`Character ID: ${reply.characterId}`);
+          console.log(`Message ID: ${reply.messageId}`);
+          console.log(`Timestamp: ${new Date(reply.timestamp).toLocaleString()}`);
+          console.log(`Response: ${reply.reply}`);
+          
+          if (reply.error) {
+            console.warn(`⚠️ Error flag detected for ${reply.characterName}`);
+          }
+        });
+        console.log('=== END RESPONSES ===\n');
+        
         const newMsgs = data.replies.map(r => ({
           id: r.messageId,
           text: r.reply,
@@ -71,6 +150,14 @@
         }));
         messages = [...messages, ...newMsgs];
       } else if (data.success && data.reply) {
+        // Log single character response (fallback for old format)
+        console.log('=== SINGLE AI RESPONSE ===');
+        console.log(`Character Name: ${data.characterName}`);
+        console.log(`Character ID: ${data.characterId}`);
+        console.log(`Message ID: ${data.aiMessageId}`);
+        console.log(`Response: ${data.reply}`);
+        console.log('=== END RESPONSE ===\n');
+        
         messages = [...messages, {
           id: data.aiMessageId,
           text: data.reply,
@@ -79,10 +166,11 @@
           characterId: data.characterId
         }];
       } else {
-        console.warn('Unexpected AI format', data);
+        console.warn('Unexpected AI response format:', data);
       }
     } else {
       const error = result?.data;
+      console.error('Error in AI response:', error?.message || 'Unknown error');
       messages = [...messages, { text: error?.message || 'Error getting AI reply', sender: 'bot', characterName: 'System' }];
     }
     scrollToBottom();
@@ -182,7 +270,7 @@
       <div class="flex items-center mr-3 flex-shrink-0">
         {#if playerCharacter}
           <div
-            class="w-12 h-12 rounded-full bg-indigo-600 flex items-center justify-center text-2xl font-bold cursor-pointer hover:bg-indigo-700 transition-colors overflow-hidden"
+            class="w-12 h-12 rounded-full bg-slate-600 flex items-center justify-center text-2xl font-bold cursor-pointer hover:bg-slate-700 transition-colors overflow-hidden"
             on:click={toggleFullscreen}
             role="button"
             tabindex="0"
@@ -190,7 +278,7 @@
             title={playerCharacter.name}
           >
             {#if playerCharacter.avatar}
-              <img src={playerCharacter.avatar} alt={playerCharacter.name} class="w-full h-full object-cover" />
+              <img src={playerCharacter.avatar} alt={playerCharacter.name} class="w-full h-full object-cover object-center" />
             {:else}
               {playerCharacter.name?.charAt(0) || '🧑'}
             {/if}
@@ -207,7 +295,7 @@
                 title={char.name}
               >
                 {#if char.avatar}
-                  <img src={char.avatar} alt={char.name} class="w-full h-full object-cover" />
+                  <img src={char.avatar} alt={char.name} class="w-full h-full object-cover object-center" />
                 {:else}
                   {char.name?.charAt(0) || '🤖'}
                 {/if}
@@ -243,14 +331,14 @@
     
     <!-- Chat messages -->
     <div class="flex-1 overflow-y-auto chat-container p-4 space-y-4 mt-2">
-      {#each messages as message}
+      {#each messages as message, index}
       <div class={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'} items-start space-x-3`}>
         {#if message.sender === 'bot'}
-          {@const character = getCharacterById(message.characterId, message.characterName)}
+          {@const character = getCharacterById(message.characterId, message.characterName, index)}
           <div class="flex-shrink-0">
-            <div class="w-14 h-14 rounded-full bg-gray-600 flex items-center justify-center text-sm font-semibold overflow-hidden" title={message.characterName}> 
+            <div class="w-14 h-14 rounded-full bg-gray-600 flex items-center justify-center text-sm font-semibold overflow-hidden" title={character?.name || message.characterName}> 
               {#if character?.avatar}
-                <img src={character.avatar} alt={message.characterName} class="w-full h-full object-cover" />
+                <img src={character.avatar} alt={character.name} class="w-full h-full object-cover object-center" />
               {:else}
                 {character?.name?.charAt(0) || message.characterName?.charAt(0) || '🤖'}
               {/if}
@@ -260,20 +348,21 @@
 
         <div class="flex flex-col max-w-3/4">
           {#if message.sender === 'bot'}
-            <div class="text-sm text-gray-300 mb-1 font-medium">{message.characterName}</div>
+            {@const character = getCharacterById(message.characterId, message.characterName, index)}
+            <div class="text-sm text-gray-300 mb-1 font-medium">{character?.name || message.characterName}</div>
           {/if}
-          <div class={`rounded-lg p-4 ${message.sender === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-gray-800 text-gray-100 rounded-bl-none'}`}> 
+          <div class={`rounded-lg p-4 ${message.sender === 'user' ? 'bg-slate-600 text-white rounded-br-none' : 'bg-gray-800 text-gray-100 rounded-bl-none'}`}> 
             {@html formatMessageText(message.text)}
           </div>
         </div>
 
         {#if message.sender === 'user'}
           <div class="flex-shrink-0">
-            <div class="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center text-sm font-semibold overflow-hidden" title={message.characterName}>
+            <div class="w-10 h-10 rounded-full bg-slate-600 flex items-center justify-center text-sm font-semibold overflow-hidden" title={playerCharacter?.name || message.characterName}>
               {#if playerCharacter?.avatar}
-                <img src={playerCharacter.avatar} alt={message.characterName} class="w-full h-full object-cover" />
+                <img src={playerCharacter.avatar} alt={playerCharacter.name} class="w-full h-full object-cover object-center" />
               {:else}
-                {playerCharacter?.name?.charAt(0) || '🧑'}
+                {playerCharacter?.name?.charAt(0) || message.characterName?.charAt(0) || '🧑'}
               {/if}
             </div>
           </div>
