@@ -6,8 +6,8 @@
   import { navbarCollapsed, toggleNavbar } from '$lib/stores/navbar';
   import { enhance } from '$app/forms';
   
-  // Get chat ID from URL
-  let chatId = $page.params.chatId;
+  // Reactive chat ID from URL
+  $: chatId = $page.params.chatId;
   
   let scenarioData = null;
   let isLoadingScenario = true;
@@ -16,13 +16,16 @@
   let playerCharacter = null;
   let aiCharacters = [];
 
-  $: if (scenarioData && scenarioData.characters && Array.isArray(scenarioData.characters)) {
-    playerCharacter = scenarioData.characters.find(c => c.isPlayer);
-    aiCharacters = scenarioData.characters.filter(c => !c.isPlayer);
+  $: if (scenarioData?.characters) {
+    // Ensure characters have unique ids (e.g., by name)
+    const chars = scenarioData.characters.map(c => ({ id: c.id || c.name, ...c }));
+    playerCharacter = chars.find(c => c.isPlayer) || null;
+    aiCharacters = chars.filter(c => !c.isPlayer);
   } else {
     playerCharacter = null;
     aiCharacters = [];
   }
+
   let input = '';
   let isFullscreen = false;
   let isLoading = false;
@@ -37,133 +40,111 @@
   ];
   let selectedModel = GROQ_MODELS[0];
 
-  // Form element reference
   let formElement;
 
-  function handleSubmitResult(result) {
-    if (result.result?.type === 'success') {
-      const data = result.result.data;
-      if (data && data.success && data.reply) {
-        messages = [...messages, { 
+  function formatMessageText(text) {
+    if (!text) return '';
+    return text
+      .replace(/\(\*([^*]+)\*\)/g, '<em class="text-gray-300 italic">$1</em>')
+      .replace(/\("([^"]+)"\)/g, '$1')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  }
+
+  // Lookup by name or id
+  function getCharacterById(characterId, characterName) {
+    if (!scenarioData?.characters) return null;
+    const chars = scenarioData.characters.map(c => ({ id: c.id || c.name, ...c }));
+    return chars.find(c => c.id === characterId || c.name === characterName) || null;
+  }
+
+  function handleSubmitResult({ result }) {
+    isLoading = false;
+    if (result?.type === 'success') {
+      const data = result.data;
+      if (data.success && Array.isArray(data.replies)) {
+        const newMsgs = data.replies.map(r => ({
+          id: r.messageId,
+          text: r.reply,
+          sender: 'bot',
+          characterName: r.characterName,
+          characterId: r.characterId
+        }));
+        messages = [...messages, ...newMsgs];
+      } else if (data.success && data.reply) {
+        messages = [...messages, {
           id: data.aiMessageId,
-          text: data.reply, 
-          sender: 'bot', 
-          characterName: data.characterName || 'AI',
-          timestamp: data.timestamp
+          text: data.reply,
+          sender: 'bot',
+          characterName: data.characterName,
+          characterId: data.characterId
         }];
       } else {
-        console.warn("AI response format unclear or missing required fields:", data);
-        messages = [...messages, { 
-          text: 'Received an unexpected response format from the AI.', 
-          sender: 'bot', 
-          characterName: 'System' 
-        }];
+        console.warn('Unexpected AI format', data);
       }
-    } else if (result.result?.type === 'failure') {
-      const error = result.result.data;
-      console.error("Form submission failed:", error);
-      messages = [...messages, { 
-        text: error.message || 'Error: Could not get AI reply.', 
-        sender: 'bot', 
-        characterName: 'System' 
-      }];
+    } else {
+      const error = result?.data;
+      messages = [...messages, { text: error?.message || 'Error getting AI reply', sender: 'bot', characterName: 'System' }];
     }
-    
-    isLoading = false;
-    // Auto-scroll to bottom
+    scrollToBottom();
+  }
+
+  function scrollToBottom() {
     setTimeout(() => {
-      const chatContainer = document.querySelector('.chat-container');
-      if (chatContainer) {
-        chatContainer.scrollTop = chatContainer.scrollHeight;
-      }
-    }, 100);
+      const container = document.querySelector('.chat-container');
+      if (container) container.scrollTo(0, container.scrollHeight);
+    }, 50);
   }
 
   async function handleSubmit() {
-    if (!input.trim()) return;
-
-    const userMessageContent = input;
-    // Add user message to UI immediately
-    messages = [...messages, { 
-      text: userMessageContent, 
-      sender: 'user', 
-      characterName: playerCharacter?.name || 'User' 
-    }];
-    input = ''; // Clear input after grabbing its content
+    if (!input.trim() || !formElement) return;
+    const userMsg = { text: input, sender: 'user', characterName: playerCharacter?.name, characterId: playerCharacter?.id };
+    messages = [...messages, userMsg];
     isLoading = true;
-
-    // Submit the form programmatically
-    if (formElement) {
-      // Create FormData with the message and selected model
-      const formData = new FormData();
-      formData.append('message', userMessageContent);
-      formData.append('selectedModel', selectedModel);
-      
-      // Trigger form submission
-      formElement.requestSubmit();
-    }
+    formElement.requestSubmit();
+    input = '';
   }
-  
+
   function handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
     }
   }
-  
+
   function toggleFullscreen() {
     isFullscreen = !isFullscreen;
-    if (isFullscreen) {
-      document.documentElement.requestFullscreen().catch(console.error);
-    } else if (document.fullscreenElement) {
-      document.exitFullscreen().catch(console.error);
-    }
+    if (isFullscreen) document.documentElement.requestFullscreen().catch(console.error);
+    else if (document.fullscreenElement) document.exitFullscreen().catch(console.error);
   }
-  
+
   export let data;
   $: ({ historyMessages = [] } = data || {});
-  
+
   onMount(async () => {
     if (!chatId) {
-      console.error("Chat ID is missing");
+      messages = [{ text: 'Error: Missing Chat ID', sender: 'bot' }];
       isLoadingScenario = false;
-      messages = [{ text: "Error: Chat ID is missing.", sender: 'bot' }];
       return;
     }
-
     try {
-      const scenarioDocRef = doc(db, 'scenarios', chatId);
-      const docSnap = await getDoc(scenarioDocRef);
-      if (docSnap.exists()) {
-        scenarioData = { id: docSnap.id, ...docSnap.data() };
-        messages = historyMessages || [];
-        // If no messages, show greeting
-        if (messages.length === 0) {
-          const greeting = scenarioData.initialGreeting || scenarioData.description || `Welcome to "${scenarioData.name || 'the chat'}"!`;
-          messages = [{ text: greeting, sender: 'bot' }];
-        }
+      const docRef = doc(db, 'scenarios', chatId);
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        scenarioData = { id: snap.id, ...snap.data() };
+        messages = historyMessages.length ? historyMessages : [{ text: scenarioData.description || `Welcome to ${scenarioData.title}`, sender: 'bot', characterName: 'System' }];
       } else {
-        console.error("No such scenario!", chatId);
-        scenarioData = { name: "Unknown Chat", avatar: "❓", description: "This chat could not be found.", color: "gray" };
-        messages = [{ text: "Error: Chat not found.", sender: 'bot' }];
+        messages = [{ text: 'Scenario not found', sender: 'bot' }];
       }
-    } catch (error) {
-      console.error("Error fetching scenario: ", error);
-      scenarioData = { name: "Error", avatar: "⚠️", description: "Could not load chat details.", color: "red" };
-      messages = [{ text: "Error loading chat details.", sender: 'bot' }];
+    } catch (err) {
+      console.error(err);
+      messages = [{ text: 'Error loading scenario', sender: 'bot' }];
     } finally {
       isLoadingScenario = false;
+      scrollToBottom();
     }
-    
-    // Auto-scroll to bottom on initial load
-    setTimeout(() => {
-      const chatContainer = document.querySelector('.chat-container');
-      if (chatContainer) {
-        chatContainer.scrollTop = chatContainer.scrollHeight;
-      }
-    }, 100);
   });
 </script>
+
 
 <div class="flex flex-col h-screen bg-gray-900 text-gray-100 relative">
   <!-- Collapse button -->
@@ -201,17 +182,17 @@
       <div class="flex items-center mr-3 flex-shrink-0">
         {#if playerCharacter}
           <div
-            class={`w-12 h-12 rounded-full bg-${playerCharacter.color || 'indigo'}-600 flex items-center justify-center text-2xl font-bold cursor-pointer hover:bg-${playerCharacter.color || 'indigo'}-700 transition-colors overflow-hidden`}
+            class="w-12 h-12 rounded-full bg-indigo-600 flex items-center justify-center text-2xl font-bold cursor-pointer hover:bg-indigo-700 transition-colors overflow-hidden"
             on:click={toggleFullscreen}
             role="button"
             tabindex="0"
             on:keydown={(e) => e.key === 'Enter' && toggleFullscreen()}
-            title={playerCharacter.name || 'Player'}
+            title={playerCharacter.name}
           >
-            {#if playerCharacter.avatar && playerCharacter.avatar.includes('http')}
-              <img src={playerCharacter.avatar} alt={playerCharacter.name || 'Player'} class="w-full h-full object-cover" />
+            {#if playerCharacter.avatar}
+              <img src={playerCharacter.avatar} alt={playerCharacter.name} class="w-full h-full object-cover" />
             {:else}
-              {playerCharacter.avatar || '🧑'}
+              {playerCharacter.name?.charAt(0) || '🧑'}
             {/if}
           </div>
         {/if}
@@ -220,22 +201,22 @@
         {/if}
         {#if aiCharacters.length > 0}
           <div class="flex -space-x-3 items-center">
-            {#each aiCharacters as char (char.id || char.name)} <!-- Assuming char has a unique id or name for keying -->
+            {#each aiCharacters as char (char.name)}
               <div
-                class={`w-10 h-10 rounded-full bg-${char.color || 'gray'}-600 flex items-center justify-center text-xl font-semibold shadow-md overflow-hidden`}
-                title={char.name || 'AI Character'}
+                class="w-10 h-10 rounded-full bg-gray-600 flex items-center justify-center text-xl font-semibold shadow-md overflow-hidden"
+                title={char.name}
               >
-                {#if char.avatar && char.avatar.includes('http')}
-                  <img src={char.avatar} alt={char.name || 'AI Character'} class="w-full h-full object-cover" />
+                {#if char.avatar}
+                  <img src={char.avatar} alt={char.name} class="w-full h-full object-cover" />
                 {:else}
-                  {char.avatar || '🤖'}
+                  {char.name?.charAt(0) || '🤖'}
                 {/if}
               </div>
             {/each}
           </div>
         {/if}
-        {#if !playerCharacter && aiCharacters.length === 0} <!-- Fallback if no characters -->
-          <div class={`w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center text-2xl font-bold`}>
+        {#if !playerCharacter && aiCharacters.length === 0}
+          <div class="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center text-2xl font-bold">
             {'❓'}
           </div>
         {/if}
@@ -262,22 +243,51 @@
     
     <!-- Chat messages -->
     <div class="flex-1 overflow-y-auto chat-container p-4 space-y-4 mt-2">
-    {#each messages as message, i}
-      <div class={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
-        <div 
-          class={`max-w-3/4 rounded-lg p-4 ${
-            message.sender === 'user' 
-              ? 'bg-indigo-600 text-white rounded-br-none' 
-              : 'bg-gray-800 text-gray-100 rounded-bl-none'
-          }`}
-        >
-          {message.text}
+      {#each messages as message}
+      <div class={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'} items-start space-x-3`}>
+        {#if message.sender === 'bot'}
+          {@const character = getCharacterById(message.characterId, message.characterName)}
+          <div class="flex-shrink-0">
+            <div class="w-14 h-14 rounded-full bg-gray-600 flex items-center justify-center text-sm font-semibold overflow-hidden" title={message.characterName}> 
+              {#if character?.avatar}
+                <img src={character.avatar} alt={message.characterName} class="w-full h-full object-cover" />
+              {:else}
+                {character?.name?.charAt(0) || message.characterName?.charAt(0) || '🤖'}
+              {/if}
+            </div>
+          </div>
+        {/if}
+
+        <div class="flex flex-col max-w-3/4">
+          {#if message.sender === 'bot'}
+            <div class="text-sm text-gray-300 mb-1 font-medium">{message.characterName}</div>
+          {/if}
+          <div class={`rounded-lg p-4 ${message.sender === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-gray-800 text-gray-100 rounded-bl-none'}`}> 
+            {@html formatMessageText(message.text)}
+          </div>
         </div>
+
+        {#if message.sender === 'user'}
+          <div class="flex-shrink-0">
+            <div class="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center text-sm font-semibold overflow-hidden" title={message.characterName}>
+              {#if playerCharacter?.avatar}
+                <img src={playerCharacter.avatar} alt={message.characterName} class="w-full h-full object-cover" />
+              {:else}
+                {playerCharacter?.name?.charAt(0) || '🧑'}
+              {/if}
+            </div>
+          </div>
+        {/if}
       </div>
     {/each}
     
     {#if isLoading}
-      <div class="flex justify-start">
+      <div class="flex justify-start items-start space-x-3">
+        <div class="flex-shrink-0">
+          <div class="w-14 h-14 rounded-full bg-gray-600 flex items-center justify-center text-sm">
+            🤖
+          </div>
+        </div>
         <div class="bg-gray-800 text-gray-100 rounded-lg p-4 rounded-bl-none">
           <div class="flex space-x-2">
             <div class="w-2 h-2 rounded-full bg-gray-400 animate-bounce"></div>
@@ -290,20 +300,17 @@
   </div>
   
   <!-- Hidden form for form actions -->
-  <form 
-    bind:this={formElement}
-    method="POST" 
-    action="?/sendMessage"
-    use:enhance={() => {
-      return ({ result }) => {
-        handleSubmitResult({ result });
-      };
-    }}
-    style="display: none;"
-  >
-    <input type="hidden" name="message" value={input} />
-    <input type="hidden" name="selectedModel" value={selectedModel} />
-  </form>
+  <form
+  bind:this={formElement}
+  method="POST"
+  action="?/sendMessage"
+  use:enhance={enhance(handleSubmitResult)}
+  style="display: none;"
+>
+  <input type="hidden" name="message" bind:value={input} />
+  <input type="hidden" name="selectedModel" bind:value={selectedModel} />
+</form>
+
   
   <!-- Model selection and Message input -->
   <div class="border-t border-gray-700 bg-gray-800 p-4">
@@ -337,6 +344,11 @@
 </div>
 
 <style>
+  em {
+    font-style: italic;
+    color: #d1d5db;
+  }
+  
   /* Custom scrollbar */
   .chat-container::-webkit-scrollbar {
     width: 6px;

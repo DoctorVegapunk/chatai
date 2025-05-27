@@ -49,7 +49,7 @@ async function getEmbedding(text) {
 
 // Function to generate AI reply using Groq
 async function generateAIReply(conversationHistory, currentMessage, scenarioData, aiCharacter, selectedModel = 'llama3-8b-8192') {
-  console.log(`[Groq] Generating AI reply. Model: ${selectedModel}. Current message: "${currentMessage.substring(0,50)}..."`);
+  console.log(`[Groq] Generating AI reply for ${aiCharacter.name}. Model: ${selectedModel}. Current message: "${currentMessage.substring(0,50)}..."`);
   try {
     const conversationContext = conversationHistory.slice(-10).map(msg => {
       const isPlayer = msg.sender_is_player; // Assuming history from Zilliz uses snake_case
@@ -69,7 +69,14 @@ ${conversationContext}
 
 Player's message to you: "${currentMessage}"
 
-Respond as ${aiCharacter.name} would, staying in character. Keep responses engaging and appropriate to the scenario. Respond in 1-3 sentences unless the situation calls for more detail.`;
+Respond as ${aiCharacter.name} would, staying in character. Keep responses engaging and appropriate to the scenario. 
+
+FORMAT YOUR RESPONSE:
+- Use (**action**) for any actions or physical descriptions
+- Use ("dialogue") for any spoken words
+- Example: (*walks closer and smiles*) ("Hello there, how are you doing today?")
+
+Your response should be between 60-100 words. Be descriptive but concise.`;
 
     const groqModelToUse = selectedModel.includes('llama') ? 'llama3-8b-8192' : selectedModel; // Or a more robust mapping
     console.log(`[Groq] Using actual model for API call: ${groqModelToUse}`);
@@ -86,7 +93,7 @@ Respond as ${aiCharacter.name} would, staying in character. Keep responses engag
           { role: 'system', content: systemPrompt },
           { role: 'user', content: currentMessage }
         ],
-        max_tokens: 300, // Adjusted for typical chat replies
+        max_tokens: 150, // Adjusted for 60-100 word responses
         temperature: 0.75,
       }),
     });
@@ -104,10 +111,10 @@ Respond as ${aiCharacter.name} would, staying in character. Keep responses engag
       throw new Error('Invalid response structure from Groq');
     }
     const reply = data.choices[0].message.content;
-    console.log(`[Groq] Successfully generated AI reply: "${reply.substring(0, 100)}..."`);
+    console.log(`[Groq] Successfully generated AI reply for ${aiCharacter.name}: "${reply.substring(0, 100)}..."`);
     return reply;
   } catch (error) {
-    console.error('[Groq] Error generating AI reply:', error.message);
+    console.error(`[Groq] Error generating AI reply for ${aiCharacter.name}:`, error.message);
     throw error;
   }
 }
@@ -229,8 +236,8 @@ export const actions = {
         console.warn('[Action SendMessage] No AI characters found in scenario.');
         return fail(400, { success: false, message: 'No AI characters found in scenario' });
       }
-      const aiCharacter = aiCharacters[0]; // Using the first AI character
-      console.log(`[Action SendMessage] Player: ${playerCharacter?.name}, AI Target: ${aiCharacter.name}`);
+      
+      console.log(`[Action SendMessage] Player: ${playerCharacter?.name}, AI Characters: ${aiCharacters.map(c => c.name).join(', ')}`);
 
       // Ensure Zilliz collection is ready (idempotent call)
       await createScenarioCollection(chatId);
@@ -264,7 +271,7 @@ export const actions = {
         message_content_text: message || '[User message missing]',
         message_type: 'dialogue',
         action_details: '',
-        dialogue_target_ids: [aiCharacter?.id || 'ai_default_id'],
+        dialogue_target_ids: Array.isArray(aiCharacters) ? aiCharacters.map(c => c?.id).filter(id => id != null) : [],
         mentioned_character_ids_in_content: [],
         key_topics_or_entities: [],
         sender_expressed_emotion: '',
@@ -275,59 +282,108 @@ export const actions = {
       await storeMessage(userMessageData);
       console.log(`[Action SendMessage] User message (ID: ${userMessageId}) stored.`);
 
-      // --- AI Reply Generation ---
-      console.log('[Action SendMessage] Generating AI reply...');
-      // Pass relevant part of history to AI - ensure it's in a format the AI prompt expects
-      const historyForAI = conversationHistory.map(h => ({ // Map to a consistent structure if needed by generateAIReply
-          sender_is_player: h.sender_is_player,
-          sender_character_id: h.sender_character_id,
-          message_content_text: h.message_content_text,
-      }));
-      const aiReply = await generateAIReply(historyForAI, message, scenarioData, aiCharacter, selectedModel);
-      const aiMessageEmbedding = await getEmbedding(aiReply);
-      const aiMessageId = generateMessageId();
-      const aiTimestamp = Date.now();
-
-      console.log("[Action] First AI character ID:", aiCharacter?.id);
+      // --- AI Replies Generation for Each Character ---
+      console.log(`[Action SendMessage] Generating replies for ${aiCharacters.length} AI characters...`);
       
-      const aiMessageData = {
-        message_id: aiMessageId || crypto.randomUUID(),
-        message_embedding: aiMessageEmbedding || Array(1536).fill(0),
-        scenario_id: chatId || 'default_scenario_id',
-        turn_number: nextTurnNumber ?? 0,
-        real_timestamp_utc_ms: aiTimestamp ?? Date.now(),
-        sender_character_id: aiCharacter?.id || 'ai_default_id',
-        sender_is_player: false,
-        venue_name: scenarioData?.venue_name || scenarioData?.venue || 'Unknown Venue',
-        sub_location_in_venue: scenarioData?.sub_location_in_venue || 'Unknown Location',
-        present_character_ids_at_location: [
-          playerCharacter?.id || 'player_default_id',
-          ...(Array.isArray(aiCharacters) ? aiCharacters.map(c => c?.id).filter(id => id != null) : [])
-        ],
-        fictional_datetime_iso: scenarioData?.currentFictionalDateTime || new Date().toISOString(),
-        fictional_total_time_elapsed_seconds: scenarioData?.fictionalTotalTimeElapsedSeconds ?? 0,
-        message_content_text: aiReply || '[AI reply missing]',
-        message_type: 'dialogue',
-        action_details: '',
-        dialogue_target_ids: [playerCharacter?.id || 'player_default_id'],
-        mentioned_character_ids_in_content: [],
-        key_topics_or_entities: [],
-        sender_expressed_emotion: '',
-        references_previous_message_ids: [userMessageId || 'unknown_msg_id'],
-        plot_relevance_score: 0.0
-      };
-      console.log(`[Action SendMessage] Storing AI message (ID: ${aiMessageId})...`);
-      await storeMessage(aiMessageData);
-      console.log(`[Action SendMessage] AI message (ID: ${aiMessageId}) stored.`);
+      const aiReplies = [];
+      const aiMessageIds = [];
+      
+      // Update conversation history to include the user message we just stored
+      const updatedHistory = [...conversationHistory, {
+        sender_is_player: true,
+        sender_character_id: playerCharacter?.id || 'player_default_id',
+        message_content_text: message,
+      }];
+
+      for (let i = 0; i < aiCharacters.length; i++) {
+        const aiCharacter = aiCharacters[i];
+        console.log(`[Action SendMessage] Processing AI character ${i + 1}/${aiCharacters.length}: ${aiCharacter.name}`);
+        
+        try {
+          // Generate AI reply for this specific character
+          const historyForAI = updatedHistory.map(h => ({
+            sender_is_player: h.sender_is_player,
+            sender_character_id: h.sender_character_id,
+            message_content_text: h.message_content_text,
+          }));
+          
+          const aiReply = await generateAIReply(historyForAI, message, scenarioData, aiCharacter, selectedModel);
+          const aiMessageEmbedding = await getEmbedding(aiReply);
+          const aiMessageId = generateMessageId();
+          const aiTimestamp = Date.now() + i; // Small offset to ensure unique timestamps
+          
+          console.log(`[Action SendMessage] AI character ${aiCharacter.name} ID:`, aiCharacter?.id);
+          
+          const aiMessageData = {
+            message_id: aiMessageId || crypto.randomUUID(),
+            message_embedding: aiMessageEmbedding || Array(1536).fill(0),
+            scenario_id: chatId || 'default_scenario_id',
+            turn_number: nextTurnNumber ?? 0,
+            real_timestamp_utc_ms: aiTimestamp ?? Date.now(),
+            sender_character_id: aiCharacter?.id || 'ai_default_id',
+            sender_is_player: false,
+            venue_name: scenarioData?.venue_name || scenarioData?.venue || 'Unknown Venue',
+            sub_location_in_venue: scenarioData?.sub_location_in_venue || 'Unknown Location',
+            present_character_ids_at_location: [
+              playerCharacter?.id || 'player_default_id',
+              ...(Array.isArray(aiCharacters) ? aiCharacters.map(c => c?.id).filter(id => id != null) : [])
+            ],
+            fictional_datetime_iso: scenarioData?.currentFictionalDateTime || new Date().toISOString(),
+            fictional_total_time_elapsed_seconds: scenarioData?.fictionalTotalTimeElapsedSeconds ?? 0,
+            message_content_text: aiReply || '[AI reply missing]',
+            message_type: 'dialogue',
+            action_details: '',
+            dialogue_target_ids: [playerCharacter?.id || 'player_default_id'],
+            mentioned_character_ids_in_content: [],
+            key_topics_or_entities: [],
+            sender_expressed_emotion: '',
+            references_previous_message_ids: [userMessageId || 'unknown_msg_id'],
+            plot_relevance_score: 0.0
+          };
+          
+          console.log(`[Action SendMessage] Storing AI message for ${aiCharacter.name} (ID: ${aiMessageId})...`);
+          await storeMessage(aiMessageData);
+          console.log(`[Action SendMessage] AI message for ${aiCharacter.name} (ID: ${aiMessageId}) stored.`);
+          
+          // Add to our response arrays
+          aiReplies.push({
+            reply: aiReply,
+            characterName: aiCharacter.name || 'AI',
+            characterId: aiCharacter.id || 'ai_default_id',
+            messageId: aiMessageId,
+            timestamp: aiTimestamp
+          });
+          
+          aiMessageIds.push(aiMessageId);
+          
+          // Update the history for the next character to see previous AI responses in this turn
+          updatedHistory.push({
+            sender_is_player: false,
+            sender_character_id: aiCharacter?.id || 'ai_default_id',
+            message_content_text: aiReply,
+          });
+          
+        } catch (error) {
+          console.error(`[Action SendMessage] Error processing AI character ${aiCharacter.name}:`, error.message);
+          // Continue with other characters even if one fails
+          aiReplies.push({
+            reply: `Error: Could not generate response for ${aiCharacter.name}`,
+            characterName: aiCharacter.name || 'AI',
+            characterId: aiCharacter.id || 'ai_default_id',
+            messageId: 'error_' + Date.now(),
+            timestamp: Date.now(),
+            error: true
+          });
+        }
+      }
 
       return { // This is what `handleSubmitResult` on client receives in `result.result.data`
         success: true,
-        reply: aiReply,
-        characterName: aiCharacter.name || 'AI', // For UI
-        characterId: aiCharacter.id, // For UI or state
+        replies: aiReplies, // Array of all AI character responses
         userMessageId: userMessageId, // For UI key or state
-        aiMessageId: aiMessageId, // For UI key or state
-        timestamp: aiTimestamp // For UI
+        aiMessageIds: aiMessageIds, // Array of all AI message IDs
+        timestamp: userTimestamp, // For UI
+        characterCount: aiCharacters.length
       };
 
     } catch (err) {
