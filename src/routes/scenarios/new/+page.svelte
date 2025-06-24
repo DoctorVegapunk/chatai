@@ -619,22 +619,52 @@
       The handleSubmit logic is now in `prepareAndSubmit` which is called by the button's on:click.
       The `enhance` function will manage the actual submission lifecycle.
     -->
-    <form method="POST" use:enhance={() => {
-      return async ({ update }) => {
-        await update(); // This is crucial for SvelteKit to update form state, etc.
-        // `form` prop will be updated by SvelteKit with the action's result.
-        // Server-side errors will be in form?.error.
-        // Successful redirects are handled automatically.
-        if (form?.error && typeof form.error === 'string') {
-            errorMessage = form.error; // Display server error
-        } else if (form?.error && typeof form.error === 'object' && form.error.error) {
-            errorMessage = form.error.error; // If server returns { error: 'message' }
+    <form method="POST" use:enhance={async ({ form, formElement, action, cancel }) => {
+      try {
+        // Prevent the default form submission
+        cancel();
+        
+        // Call prepareAndSubmit which will set jsonScenarioData
+        await prepareAndSubmit();
+        
+        if (errorMessage) {
+          // If there was an error in prepareAndSubmit, stop here
+          return;
         }
-        // Clear client-side success message if form submission had an error, or rely on redirect for success.
-        if (form?.error) successMessage = ''; 
-      };
+        
+        // Manually submit the form with the prepared data
+        const formData = new FormData(formElement);
+        const response = await fetch(formElement.action, {
+          method: 'POST',
+          body: formData,
+          headers: {
+            'accept': 'application/json'
+          }
+        });
+        
+        const result = await response.json();
+        
+        // Handle the response
+        if (result.type === 'failure') {
+          errorMessage = result.error?.message || 'Failed to create scenario';
+          return { form: { error: errorMessage } };
+        }
+        
+        // On success, redirect to the new scenario
+        if (result.data?.id) {
+          goto(`/scenarios/${result.data.id}`);
+        } else {
+          goto('/scenarios');
+        }
+        
+        return { form: result };
+      } catch (error) {
+        console.error('Form submission error:', error);
+        errorMessage = error.message || 'An error occurred while submitting the form';
+        return { form: { error: errorMessage } };
+      }
     }} class="space-y-8">
-      <input type="hidden" name="scenarioDataJson" bind:value={jsonScenarioData} />
+      <input type="hidden" name="scenarioDataJson" value={jsonScenarioData} />
       <!-- Select Existing Scenario -->
       <div class="bg-gray-800 rounded-lg p-6 border border-gray-700 mb-8">
         <h2 class="text-xl font-semibold mb-4">Start from Existing Scenario (Optional)</h2>
